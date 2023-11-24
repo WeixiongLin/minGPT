@@ -1,11 +1,13 @@
 """
-Trains a GPT to add n-digit numbers.
-
 ```
 cd /mnt/petrelfs/linweixiong/num_rep/minGPT/projects/adder && \
 srun -p medai --job-name adder --gres=gpu:1 \
-python adder.py
+python inference.py
 
+# Multi
+cd /mnt/petrelfs/linweixiong/num_rep/minGPT/projects/adder && \
+srun -p medai --job-name adder --gres=gpu:1 \
+python inference.py
 ```
 """
 
@@ -20,6 +22,15 @@ from torch.utils.data.dataloader import DataLoader
 from mingpt.model import GPT
 from mingpt.trainer import Trainer
 from mingpt.utils import set_seed, setup_logging, CfgNode as CN
+import argparse
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume-path', type=str, action='append')
+    args = parser.parse_args()
+    return args
+
+args = parse_args()
 
 # -----------------------------------------------------------------------------
 
@@ -75,7 +86,7 @@ class AdditionDataset(Dataset):
     @staticmethod
     def get_default_config():
         C = CN()
-        C.ndigit = 3
+        C.ndigit = 2
         return C
 
     def __init__(self, config, split):
@@ -144,71 +155,33 @@ if __name__ == '__main__':
     config.model.vocab_size = train_dataset.get_vocab_size()
     config.model.block_size = train_dataset.get_block_size()
     model = GPT(config.model)
+    resume_path = '/mnt/petrelfs/linweixiong/num_rep/minGPT/projects/adder/out/adder/model.pt'
+    model.load_state_dict(torch.load(resume_path))
+    model.eval()
 
     # construct the trainer object
     trainer = Trainer(config.trainer, model, train_dataset)
 
+    ndigit = config.data.ndigit
     # helper function for the evaluation of a model
-    def eval_split(trainer, split, max_batches=None):
-        dataset = {'train':train_dataset, 'test':test_dataset}[split]
-        ndigit = config.data.ndigit
-        results = []
-        mistakes_printed_already = 0
-        factors = torch.tensor([[10**i for i in range(ndigit+1)][::-1]]).to(trainer.device)
-        loader = DataLoader(dataset, batch_size=100, num_workers=0, drop_last=False)
-        for b, (x, y) in enumerate(loader):
-            x = x.to(trainer.device)
-            # isolate the first two digits of the input sequence alone
-            d1d2 = x[:, :ndigit*2]
-            # let the model sample the rest of the sequence
-            d1d2d3 = model.generate(d1d2, ndigit+1, do_sample=False) # using greedy argmax, not sampling
-            # isolate the last digit of the sampled sequence
-            d3 = d1d2d3[:, -(ndigit+1):]
-            d3 = d3.flip(1) # reverse the digits to their "normal" order
-            # decode the integers from individual digits
-            d1i = (d1d2[:,:ndigit] * factors[:,1:]).sum(1)
-            d2i = (d1d2[:,ndigit:ndigit*2] * factors[:,1:]).sum(1)
-            d3i_pred = (d3 * factors).sum(1)
-            d3i_gt = d1i + d2i # manually calculate the ground truth
-            # evaluate the correctness of the results in this batch
-            correct = (d3i_pred == d3i_gt).cpu() # Software 1.0 vs. Software 2.0 fight RIGHT on this line haha
-            for i in range(x.size(0)):
-                results.append(int(correct[i]))
-                if not correct[i] and mistakes_printed_already < 5: # only print up to 5 mistakes to get a sense
-                    mistakes_printed_already += 1
-                    print("GPT claims that %d + %d = %d but gt is %d" % (d1i[i], d2i[i], d3i_pred[i], d3i_gt[i]))
-            if max_batches is not None and b+1 >= max_batches:
-                break
-        rt = torch.tensor(results, dtype=torch.float)
-        print("%s final score: %d/%d = %.2f%% correct" % (split, rt.sum(), len(results), 100*rt.mean()))
-        return rt.sum()
+    factors = torch.tensor([[10**i for i in range(ndigit+1)][::-1]]).to(trainer.device)
 
-    # iteration callback
-    top_score = 0
-    def batch_end_callback(trainer):
-        global top_score
+    x = torch.tensor([[1,2,3,4], [2,3,4,5]])
+    x = x.to(trainer.device)
+    # isolate the first two digits of the input sequence alone
+    d1d2 = x[:, :ndigit*2]
+    # let the model sample the rest of the sequence
+    d1d2d3 = model.generate(d1d2, ndigit+1, do_sample=False) # using greedy argmax, not sampling
+    # isolate the last digit of the sampled sequence
+    d3 = d1d2d3[:, -(ndigit+1):]
+    d3 = d3.flip(1) # reverse the digits to their "normal" order
+    # decode the integers from individual digits
+    d1i = (d1d2[:,:ndigit] * factors[:,1:]).sum(1)
+    d2i = (d1d2[:,ndigit:ndigit*2] * factors[:,1:]).sum(1)
+    d3i_pred = (d3 * factors).sum(1)
+    d3i_gt = d1i + d2i # manually calculate the ground truth
+    # evaluate the correctness of the results in this batch
+    correct = (d3i_pred == d3i_gt).cpu() # Software 1.0 vs. Software 2.0 fight RIGHT on this line haha
 
-        if trainer.iter_num % 10 == 0:
-            print(f"iter_dt {trainer.iter_dt * 1000:.2f}ms; iter {trainer.iter_num}: train loss {trainer.loss.item():.5f}")
-
-        if trainer.iter_num % 500 == 0:
-            # evaluate both the train and test score
-            train_max_batches = {1: None, 2: None, 3: 5}[config.data.ndigit] # if ndigit=2 we can afford the whole train set, ow no
-            model.eval()
-            with torch.no_grad():
-                train_score = eval_split(trainer, 'train', max_batches=train_max_batches)
-                test_score  = eval_split(trainer, 'test',  max_batches=None)
-            score = train_score + test_score
-            # save the model if this is the best score we've seen so far
-            if score > top_score:
-                top_score = score
-                print(f"saving model with new top score of {score}")
-                ckpt_path = os.path.join(config.system.work_dir, "model.pt")
-                torch.save(model.state_dict(), ckpt_path)
-            # revert model to training mode
-            model.train()
-
-    trainer.set_callback('on_batch_end', batch_end_callback)
-
-    # run the optimization
-    trainer.run()
+    print(f'\033[32md3i_pred\033[0m: {d3i_pred}')
+    print(f'\033[32md3i_gt\033[0m: {d3i_gt}')

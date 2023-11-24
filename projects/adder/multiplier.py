@@ -3,8 +3,8 @@ Trains a GPT to add n-digit numbers.
 
 ```
 cd /mnt/petrelfs/linweixiong/num_rep/minGPT/projects/adder && \
-srun -p medai --job-name adder --gres=gpu:1 \
-python adder.py
+srun -p medai --job-name multi --gres=gpu:1 \
+python multiplier.py
 
 ```
 """
@@ -30,10 +30,10 @@ def get_config():
     # system
     C.system = CN()
     C.system.seed = 3407
-    C.system.work_dir = './out/adder'
+    C.system.work_dir = './out/multi'
 
     # data
-    C.data = AdditionDataset.get_default_config()
+    C.data = MultipDataset.get_default_config()
 
     # model
     C.model = GPT.get_default_config()
@@ -47,7 +47,7 @@ def get_config():
 
 # -----------------------------------------------------------------------------
 
-class AdditionDataset(Dataset):
+class MultipDataset(Dataset):
     """
     Creates n-digit addition problems. For example, if n=2, then an example
     addition problem would be to add 85 + 50 = 135. This problem would be
@@ -75,7 +75,7 @@ class AdditionDataset(Dataset):
     @staticmethod
     def get_default_config():
         C = CN()
-        C.ndigit = 3
+        C.ndigit = 2
         return C
 
     def __init__(self, config, split):
@@ -96,10 +96,10 @@ class AdditionDataset(Dataset):
         return 10 # digits 0..9
 
     def get_block_size(self):
-        # a,b,a+b, and +1 due to potential carry overflow,
+        # a,b,a*b, and +1 due to potential carry overflow,
         # but then also -1 because very last digit doesn't ever plug back
         # as there is no explicit <EOS> token to predict, it is implied
-        return 3*self.config.ndigit + 1 - 1
+        return (1+1+2)*self.config.ndigit - 1
 
     def __len__(self):
         return self.ixes.nelement()
@@ -112,11 +112,11 @@ class AdditionDataset(Dataset):
         a = idx // nd
         b = idx %  nd
         # calculate the "label" of the addition problem a + b
-        c = a + b
+        c = a * b
         # encode the digits of a, b, c into strings
         astr = f'%0{ndigit}d' % a
         bstr = f'%0{ndigit}d' % b
-        cstr = (f'%0{ndigit+1}d' % c)[::-1] # reverse c to make addition easier
+        cstr = (f'%0{2 * ndigit}d' % c)[::-1] # reverse c to make addition easier
         render = astr + bstr + cstr
         dix = [int(s) for s in render] # convert each character to its token index
         # x will be input to GPT and y will be the associated expected outputs
@@ -137,8 +137,9 @@ if __name__ == '__main__':
     set_seed(config.system.seed)
 
     # construct train and test datasets
-    train_dataset = AdditionDataset(config.data, split='train')
-    test_dataset  = AdditionDataset(config.data, split='test')
+    train_dataset = MultipDataset(config.data, split='train')
+    test_dataset  = MultipDataset(config.data, split='test')
+    # raise RuntimeError(test_dataset[0])
 
     # construct the model
     config.model.vocab_size = train_dataset.get_vocab_size()
